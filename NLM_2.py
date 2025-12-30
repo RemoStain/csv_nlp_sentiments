@@ -1,41 +1,39 @@
-from nltk.tokenize.toktok import ToktokTokenizer
-
-from itertools import tee
+import json
+from pathlib import Path
 from collections import Counter
+from typing import Iterable, Iterator
 
 import pandas as pd
+from nltk.tokenize.toktok import ToktokTokenizer
+
 from safe_input import safe_input
+from error_handling_CW import error_handling
 from dataclasses import dataclass
+from itertools import tee
 
-_tokenizer = ToktokTokenizer()
 
+# Configuration
+STOPWORD_FILE = Path("stopwords.json")
+CHUNKSIZE = 50000
 
 @dataclass(frozen=True)
 class InputPreset:
-    preset_value: int
     file_default: str
     col_default: str
     limit_default: int
 
 
 INPUT_PRESETS: dict[int, InputPreset] = {
-    # 0 = Gaza comments
-    0: InputPreset(
-        preset_value=0,
-        file_default="comments.csv",
-        col_default="self_text",
-        limit_default=100,
-    ),
-    # 1 = Yasmin's comments
-    1: InputPreset(
-        preset_value=1,
-        file_default="Yasmins_comments.csv",
-        col_default="Content",
-        limit_default=100,
-    ),
+    0: InputPreset(file_default="comments.csv", col_default="self_text", limit_default=1000),
+    1: InputPreset(file_default="Yasmins_comments.csv", col_default="Content", limit_default=100),
 }
 
 
+# Tokenizer
+_tokenizer = ToktokTokenizer()
+
+
+# CSV sentence stream
 def csv_reading_gen(
     file_name="comments.csv",
     col_name="self_text",
@@ -58,7 +56,6 @@ def csv_reading_gen(
     Returns:
         generator or None: A generator yielding sentences, or None if no valid sentences found.
         list: List of multi-line entries.
-
     """
 
     if multiline_bucket is None:
@@ -76,7 +73,8 @@ def csv_reading_gen(
                 chunksize=chunksize,
             )
         )
-    except Exception:
+    except Exception as e:
+        error_handling(e)
         return None
 
     def is_multiparagraph(text: str) -> bool:
@@ -123,7 +121,8 @@ def csv_reading_gen(
             # If no valid sentences were found, stop generator
             if count == 0:
                 return
-        except Exception:
+        except Exception as e:
+            error_handling(e)
             return  # any runtime error just stops generator
 
     # Create generator
@@ -142,38 +141,76 @@ def csv_reading_gen(
     return g_live
 
 
-def word_frequency(sentences):
-    freqs = Counter()
-    for s in sentences:
+# Stopword loading (isolated)
+def load_stopwords(sentences: Iterable[str]) -> set[str]:
+    """
+    Load stopwords from disk or build them if not present.
+    Args:
+        sentences (iterable of str): Input sentences for building stopwords if needed.
+    Returns:
+        set of str: Set of stopwords.
+    """
 
-        freqs.update(t.lower() for t in _tokenizer.tokenize(s) if t.isalpha())
+    if not STOPWORD_FILE.exists():
+
+        from build_stopwords import build_stopwords
+
+        build_stopwords(sentences, output=str(STOPWORD_FILE))
+    else:
+        pass
+
+    with STOPWORD_FILE.open("r", encoding="utf-8") as f:
+        return set(json.load(f))
+
+
+# Word frequency
+def word_frequency(
+    sentences: Iterable[str],
+    stopwords: set[str],
+) -> Counter[str]:
+    """
+    Compute word frequency from sentences, excluding stopwords.
+    Args:
+        sentences (iterable of str): Input sentences.
+        stopwords (set of str): Set of stopwords to exclude.
+    Returns:
+        Counter[str]: Word frequency counter.
+    """
+    freqs: Counter[str] = Counter()
+
+    for s in sentences:
+        for t in _tokenizer.tokenize(s):
+            w = t.lower()
+            if w.isalpha() and w not in stopwords:
+                freqs[w] += 1
+
     return freqs
 
 
-if __name__ == "__main__":
-    DEBUG_MODE = 1  # change this integer to switch behavior
+# Main
+def main(DEBUG_MODE) -> None:
 
     preset = INPUT_PRESETS.get(DEBUG_MODE)
     if preset is None:
         raise ValueError(f"Invalid DEBUG_MODE: {DEBUG_MODE}")
     try:
-        sentences = csv_reading_gen(
-            safe_input(
-                str,
-                f"Enter CSV file name (default: {preset.file_default}): ",
-                default=preset.file_default,
-            ),
-            safe_input(
-                str,
-                f"Enter column name (default: {preset.col_default}): ",
-                default=preset.col_default,
-            ),
-            limit=safe_input(
-                int,
-                f"Enter max number of sentences to load (0 = all, default: {preset.limit_default}): ",
-                default=preset.limit_default,
-            ),
+        
+        file_name = safe_input(
+            str,
+            f"Enter CSV file name (default: {preset.file_default}): ",
+            default=preset.file_default,
         )
+        column_name = safe_input(
+            str,
+            f"Enter column name (default: {preset.col_default}): ",
+            default=preset.col_default,
+        )
+        limit=safe_input(
+            int,
+            f"Enter max number of sentences to load (0 = all, default: {preset.limit_default}): ",
+            default=preset.limit_default,
+        )
+    
     except Exception as e:
         print(f"Error loading CSV sentences: {e}")
 
@@ -183,6 +220,29 @@ if __name__ == "__main__":
             default="Hello World!;Subject is BAD BAD BAD!!;Subject is not too bad.;Subject is the best thing ever!",
         ).split(";")
 
-    freqs = word_frequency(sentences)
+    # csv_reading_gen is one-pass, so we create it twice if stopwords need building
+    sentences_for_stopwords = csv_reading_gen(
+        file_name,
+        column_name,
+        limit=limit,
+    )
 
-    print(freqs.most_common(10))
+    stopwords = load_stopwords(sentences_for_stopwords)
+
+    # Re-create the stream for actual processing
+    sentences = csv_reading_gen(
+        file_name,
+        column_name,
+        limit=limit,
+    )
+
+    freqs = word_frequency(sentences, stopwords)
+
+    for word, count in freqs.most_common(20):
+        print(f"{word}: {count}")
+
+
+if __name__ == "__main__":
+    DEBUG_MODE = 0  # change this integer to switch behavior
+
+    main(DEBUG_MODE)

@@ -16,6 +16,7 @@ from itertools import tee
 STOPWORD_FILE = Path("stopwords.json")
 CHUNKSIZE = 50000
 
+
 @dataclass(frozen=True)
 class InputPreset:
     file_default: str
@@ -24,8 +25,15 @@ class InputPreset:
 
 
 INPUT_PRESETS: dict[int, InputPreset] = {
-    0: InputPreset(file_default="comments.csv", col_default="self_text", limit_default=1000),
-    1: InputPreset(file_default="Yasmins_comments.csv", col_default="Content", limit_default=100),
+    0: InputPreset(
+        file_default="comments.csv", col_default="self_text", limit_default=1000
+    ),
+    1: InputPreset(
+        file_default="Yasmins_comments.csv", col_default="Content", limit_default=100
+    ),
+    2: InputPreset(
+        file_default="inventory.txt", col_default="Row1", limit_default=300
+    ),
 }
 
 
@@ -194,7 +202,7 @@ def main(DEBUG_MODE) -> None:
     if preset is None:
         raise ValueError(f"Invalid DEBUG_MODE: {DEBUG_MODE}")
     try:
-        
+
         file_name = safe_input(
             str,
             f"Enter CSV file name (default: {preset.file_default}): ",
@@ -205,20 +213,39 @@ def main(DEBUG_MODE) -> None:
             f"Enter column name (default: {preset.col_default}): ",
             default=preset.col_default,
         )
-        limit=safe_input(
+        limit = safe_input(
             int,
             f"Enter max number of sentences to load (0 = all, default: {preset.limit_default}): ",
             default=preset.limit_default,
         )
-    
+
     except Exception as e:
         print(f"Error loading CSV sentences: {e}")
-
         sentences = safe_input(
             str,
             "No comments found. Enter sentences separated by ';': ",
             default="Hello World!;Subject is BAD BAD BAD!!;Subject is not too bad.;Subject is the best thing ever!",
         ).split(";")
+    try:
+        if file_name.endswith(".txt"):
+            df = pd.read_csv(
+                file_name,
+                header=None,
+                names=["Row1"],
+            )
+            df.dropna()
+            df.to_csv("text_to_csv.csv", index=False)
+
+            file_name = "text_to_csv.csv"
+            column_name = "Row1"
+            limit = 0
+            # raise ValueError("Text file input is not supported in this version.")
+
+        else:
+            pass
+    except Exception as e:
+        print(f"Error processing text file: {e}")
+        return
 
     # csv_reading_gen is one-pass, so we create it twice if stopwords need building
     sentences_for_stopwords = csv_reading_gen(
@@ -243,6 +270,6 @@ def main(DEBUG_MODE) -> None:
 
 
 if __name__ == "__main__":
-    DEBUG_MODE = 0  # change this integer to switch behavior
+    DEBUG_MODE = 2  # change this integer to switch behavior
 
     main(DEBUG_MODE)

@@ -31,7 +31,7 @@ def load_and_filter_csv(
 
 
 if __name__ == "__main__":
-    csv_path = "Yasmins_data.csv"
+    csv_path = "November_TMS.csv"
     keep_cols = ["Content type", "Content"]
 
     comments_df = load_and_filter_csv(csv_path, keep_cols)
@@ -39,7 +39,7 @@ if __name__ == "__main__":
     print(comments_df.head())
 
     comments_df.to_csv(
-        "Yasmins_comments.csv",
+        "November_Comments.csv",
         index=False,
         encoding="utf-8",
         sep=",",

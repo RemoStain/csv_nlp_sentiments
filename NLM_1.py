@@ -41,14 +41,14 @@ INPUT_PRESETS: dict[int, InputPreset] = {
     # 1 = Small Data Set
     1: InputPreset(
         preset_value=1,
-        file_default="Yasmins_comments.csv",
+        file_default="November_Comments.csv",
         col_default="Content",
         limit_default=100,
     ),
-    # 2 = More Filtered Data Set
+    # 2 = Filter 2
     2: InputPreset(
         preset_value=2,
-        file_default="Yasmins_comments2.csv",
+        file_default="December_Comments.csv",
         col_default="Content",
         limit_default=100,
     ),
@@ -89,6 +89,8 @@ class SentimentViewer:
 
         self.sid = SentimentIntensityAnalyzer()
 
+        self.records: list[dict[str, object]] = []
+
     @staticmethod
     def value_to_hex(val: float) -> str:
         """
@@ -103,25 +105,38 @@ class SentimentViewer:
         b = 0
         return f"#{r:02X}{g:02X}{b:02X}"
 
+
     def add_line(self, sentence: str, score: Optional[float] = None) -> None:
         """
-        Add a sentence line with sentiment coloring.
-        Args:
-            sentence (str): The sentence to analyze and display.
-            score (float or None): Optional pre-computed compound sentiment score.
+        Add a sentence to the text widget with color based on sentiment,
+        and also store raw sentence + compound score in self.records for CSV export.
         """
         # Treat 0.0 as a valid provided score (do not fall back to re-analysis)
         if score is not None:
-            ss = {"compound": score}
-            colour = self.value_to_hex(score)
+            compound = float(score)
+            ss = {"compound": compound}
         else:
             try:
                 ss = self.sid.polarity_scores(sentence)
-                colour = self.value_to_hex(ss["compound"])
+                compound = float(ss["compound"])
             except Exception as e:
                 ss = {"neg": 0.0, "neu": 0.0, "pos": 0.0, "compound": 0.0}
-                colour = "#FFC0CB"
-                sentence += f" [Error analyzing sentiment: {e}]"
+                compound = 0.0
+                sentence = f"{sentence} [Error analyzing sentiment: {e}]"
+
+        # Ensure records exists
+        if not hasattr(self, "records"):
+            self.records = []
+
+        # Store structured data for later CSV export (keep raw separate from display formatting)
+        self.records.append(
+            {
+                "sentence": sentence,
+                "compound": compound,
+            }
+        )
+
+        colour = self.value_to_hex(compound)
 
         if self.console_output:
             print(sentence)
@@ -129,16 +144,16 @@ class SentimentViewer:
                 print(f"{k}: {ss[k]}, ", end="")
             print(f"colour: {colour}\n")
 
-        sentence = f"{sentence}  [compound: {ss['compound']}]"
-
-        self.text_widget.insert("end", sentence + "\n")
+        # Presentation-only formatting
+        display_text = f"{sentence}  [compound: {compound}]"
+        self.text_widget.insert("end", display_text + "\n")
 
         line_start = f"{float(self.text_widget.index('end')) - 2} linestart"
         line_end = f"{float(self.text_widget.index('end')) - 1} lineend"
         tag_name = f"line{float(self.text_widget.index('end'))}"
+
         self.text_widget.tag_add(tag_name, line_start, line_end)
         self.text_widget.tag_config(tag_name, foreground=colour)
-
         self.text_widget.see("end")
 
     def run(self) -> None:
@@ -253,6 +268,7 @@ def to_csv(output_file: str, sentences: pd.DataFrame) -> None:
         print(f"Error saving sentences to CSV: {e}")
 
 
+
 # App logic
 def get_preset(debug_mode: int) -> InputPreset:
     preset = INPUT_PRESETS.get(debug_mode)
@@ -302,6 +318,7 @@ def get_sentences(preset: InputPreset) -> Union[Iterable[str], list[str]]:
         sentences = load_csv_sentences(file_name, col_name, limit=limit)
         if sentences is None:
             return prompt_manual_sentences()
+
         return sentences
     except Exception as e:
         print(f"Error loading CSV sentences: {e}")
@@ -346,11 +363,21 @@ def run_pipeline(
         None
     """
     if average_only:
-        # Consume sentences once
-        avg, count = compute_average_compound(sentences)
+        sid = SentimentIntensityAnalyzer()
+        total = 0.0
+        count = 0
+
+        for s in sentences:
+            ss = sid.polarity_scores(s)
+            total += ss["compound"]
+            count += 1
+            viewer.add_line(s)
+
+        avg = total / count if count > 0 else 0.0
         viewer.add_line(average_line_text(avg, count), score=avg)
         print(average_line_text(avg, count))
         return
+
 
     # Need one pass that both displays lines and computes average.
     sid = SentimentIntensityAnalyzer()
@@ -366,6 +393,9 @@ def run_pipeline(
     viewer.add_line(average_line_text(avg, count), score=avg)
     print(average_line_text(avg, count))
     viewer.run()
+    CSV_df = pd.DataFrame(viewer.records)
+    to_csv("sentiment_output.csv", CSV_df)
+
 
 
 def main(debug_mode: int = 1) -> None:
@@ -386,5 +416,5 @@ def main(debug_mode: int = 1) -> None:
 
 
 if __name__ == "__main__":
-    DEBUG_MODE = 1  # change this integer to switch behavior
+    DEBUG_MODE = 2  # change this integer to switch behavior
     main(DEBUG_MODE)

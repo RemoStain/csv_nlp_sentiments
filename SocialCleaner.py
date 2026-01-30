@@ -1,5 +1,5 @@
 import pandas as pd
-import config
+import nlp.config_cleaner as config
 
 
 class CsvCommentCleaner:
@@ -20,7 +20,7 @@ class CsvCommentCleaner:
             return False
         return all(ord(ch) > 127 for ch in val)
 
-    def load(self) -> pd.DataFrame:
+    def load(self) -> pd.DataFrame: 
         return pd.read_csv(config.DEFAULT_DATAFILE)
 
     def filter_comments(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -50,6 +50,7 @@ class CsvCommentCleaner:
             encoding=config.OUTPUT_ENCODING,
             sep=config.OUTPUT_SEPARATOR,
         )
+        print("Saved to: " + config.OUTPUT_PATH)
 
 
 if __name__ == "__main__":

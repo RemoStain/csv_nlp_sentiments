@@ -6,9 +6,9 @@ import tkinter as tk
 import tkinter.font as tkFont
 from nltk.sentiment.vader import SentimentIntensityAnalyzer
 
-from safe_input import safe_input
-from NLM_config import INPUT_PRESETS, InputPreset
-
+from nlp.safe_input import safe_input
+from nlp.config_nlm import INPUT_PRESETS, InputPreset
+ 
 
 class SentimentViewer:
     def __init__(
@@ -39,11 +39,14 @@ class SentimentViewer:
 
         self.text_widget.pack(side="left", fill="both", expand=True)
         self.scrollbar.pack(side="right", fill="y")
+        self.analyzed_sentences = []
 
         self.sid = SentimentIntensityAnalyzer()
 
     @staticmethod
     def value_to_hex(val: float) -> str:
+        if val == 0:
+            return "#0066ff"
         r = int(max(0, 255 * (1 - (val + 1) / 2)))
         g = int(max(0, 255 * ((val + 1) / 2)))
         b = 0
@@ -69,6 +72,7 @@ class SentimentViewer:
             print(f"colour: {colour}\n")
 
         sentence = f"{sentence}  [compound: {ss['compound']}]"
+        self.analyzed_sentences.append(sentence)
 
         self.text_widget.insert("end", sentence + "\n")
 
@@ -179,6 +183,10 @@ def get_preset(debug_mode: int) -> InputPreset:
 
 
 def prompt_csv_inputs(preset: InputPreset) -> tuple[str, str, int]:
+    # Skip asking if preset is 0
+    if preset.preset_value == 0:
+        print(f"Filename: {preset.file_default} \nColumn to check: {preset.col_default} \nMax number of lines (0 = all): {preset.limit_default}")
+        return preset.file_default, preset.col_default, preset.limit_default
     file_name = safe_input(
         str,
         f"Enter CSV file name (default: {preset.file_default}): ",
@@ -239,6 +247,7 @@ def run_pipeline(
     *,
     average_only: bool,
 ) -> None:
+    sentences = list(sentences)
     if average_only:
         avg, count = compute_average_compound(sentences)
         viewer.add_line(average_line_text(avg, count), score=avg)
@@ -256,12 +265,21 @@ def run_pipeline(
         viewer.add_line(s)
 
     avg = total / count if count > 0 else 0.0
-    viewer.add_line(average_line_text(avg, count), score=avg)
-    print(average_line_text(avg, count))
+    alt = average_line_text(avg, count)
+    viewer.add_line(alt, score=avg)
+    print(alt)
+
+    viewer.analyzed_sentences.append(alt)
+    v_sentences = viewer.analyzed_sentences
+
+    df = pd.DataFrame(v_sentences, columns=["Text"])
+    to_csv("sentiment_output.csv", df)
+
     viewer.run()
+    
 
 
-def main(debug_mode: int = 1) -> None:
+def main(debug_mode: int = 0) -> None:
     preset = get_preset(debug_mode)
 
     sentences = get_sentences(preset)
@@ -281,6 +299,6 @@ def main(debug_mode: int = 1) -> None:
 
 
 if __name__ == "__main__":
-    DEBUG_MODE = 1
+    DEBUG_MODE = 0
     main(DEBUG_MODE)
 

@@ -1,24 +1,44 @@
 from itertools import tee
-from typing import Iterable, Optional, Union
+from typing import Iterable, Optional
+from pathlib import Path
 
 import pandas as pd
 import tkinter as tk
 import tkinter.font as tkFont
 from nltk.sentiment.vader import SentimentIntensityAnalyzer
 
-from nlp.safe_input import safe_input
-from nlp.config_nlm import INPUT_PRESETS, InputPreset
- 
+import config_cleaner as config
+
+
+col_name = "Content"
+limit = 2500
+
+
+def compound_to_100(score: float) -> float:
+    return (score + 1) * 50.0
+
+def build_analyzer() -> SentimentIntensityAnalyzer:
+    sid = SentimentIntensityAnalyzer()
+    sid.lexicon.update(
+        {
+            "donated": 0.25,
+            "carney": -0.25,
+        }
+    )
+    return sid
+
 
 class SentimentViewer:
     def __init__(
         self,
+        sid: SentimentIntensityAnalyzer,
         title: str = "Sentiment Viewer",
         width: int = 80,
         height: int = 25,
         console_output: bool = False,
     ):
         self.console_output = console_output
+        self.sid = sid
         self.root = tk.Tk()
         self.root.title(title)
 
@@ -39,9 +59,7 @@ class SentimentViewer:
 
         self.text_widget.pack(side="left", fill="both", expand=True)
         self.scrollbar.pack(side="right", fill="y")
-        self.analyzed_sentences = []
-
-        self.sid = SentimentIntensityAnalyzer()
+        self.analyzed_sentences: list[str] = []
 
     @staticmethod
     def value_to_hex(val: float) -> str:
@@ -52,58 +70,82 @@ class SentimentViewer:
         b = 0
         return f"#{r:02X}{g:02X}{b:02X}"
 
-    def add_line(self, sentence: str, score: Optional[float] = None) -> None:
-        if score is not None:
-            ss = {"compound": score}
-            colour = self.value_to_hex(score)
-        else:
+    def add_line(
+        self,
+        sentence: str,
+        score: Optional[float] = None,
+        colour_override: str = "",
+    ) -> None:
+        if score is None:
             try:
-                ss = self.sid.polarity_scores(sentence)
-                colour = self.value_to_hex(ss["compound"])
+                score = self.sid.polarity_scores(sentence)["compound"]
+                colour = self.value_to_hex(score)
             except Exception as e:
-                ss = {"neg": 0.0, "neu": 0.0, "pos": 0.0, "compound": 0.0}
+                score = 0.0
                 colour = "#FFC0CB"
                 sentence += f" [Error analyzing sentiment: {e}]"
+        else:
+            colour = self.value_to_hex(score)
+
+        if len(colour_override) == 7:
+            colour = colour_override
 
         if self.console_output:
             print(sentence)
-            for k in sorted(ss):
-                print(f"{k}: {ss[k]}, ", end="")
-            print(f"colour: {colour}\n")
+            print(f"compound: {score}, colour: {colour}\n")
 
-        sentence = f"{sentence}  [compound: {ss['compound']}]"
+        sentence = f"{sentence}  [compound: {score}]"
         self.analyzed_sentences.append(sentence)
 
         self.text_widget.insert("end", sentence + "\n")
 
-        line_start = f"{float(self.text_widget.index('end')) - 2} linestart"
-        line_end = f"{float(self.text_widget.index('end')) - 1} lineend"
-        tag_name = f"line{float(self.text_widget.index('end'))}"
+        line_number = int(self.text_widget.index("end-1c").split(".")[0]) - 1
+        line_start = f"{line_number}.0"
+        line_end = f"{line_number}.end"
+        tag_name = f"line{line_number}"
+
         self.text_widget.tag_add(tag_name, line_start, line_end)
         self.text_widget.tag_config(tag_name, foreground=colour)
-
         self.text_widget.see("end")
 
     def run(self) -> None:
         self.root.mainloop()
 
 
+def _normalize_network_filter(network_filter: Optional[str]) -> Optional[str]:
+    if network_filter is None:
+        return None
+
+    allowed = {n.casefold(): n for n in getattr(config, "NETWORKS", []) or []}
+    key = network_filter.strip().casefold()
+
+    if allowed and key not in allowed:
+        return ""
+
+    return allowed.get(key, network_filter.strip())
+
+
 def load_csv_sentences(
-    file_name: str = "comments.csv",
-    col_name: str = "self_text",
+    file_name: str = "data.csv",
+    col_name: str = "Content",
     chunksize: int = 50000,
     limit: int = 0,
     multiline_bucket: Optional[list[str]] = None,
     treat_blankline_as_paragraph: bool = False,
+    network_col: str = "Network",
+    network_filter: Optional[str] = None,
 ) -> Optional[Iterable[str]]:
     if multiline_bucket is None:
         multiline_bucket = []
+
+    network = _normalize_network_filter(network_filter)
+    usecols = [col_name] if network is None else [network_col, col_name]
 
     try:
         _ = next(
             pd.read_csv(
                 file_name,
-                usecols=[col_name],
+                usecols=usecols,
                 encoding="utf-8",
                 encoding_errors="ignore",
                 chunksize=chunksize,
@@ -119,40 +161,42 @@ def load_csv_sentences(
     def generator() -> Iterable[str]:
         count = 0
         row_offset = 0
+
         try:
             for chunk in pd.read_csv(
                 file_name,
-                usecols=[col_name],
+                usecols=usecols,
                 encoding="utf-8",
                 encoding_errors="ignore",
                 chunksize=chunksize,
             ):
+                if network is not None:
+                    chunk = chunk[
+                        chunk[network_col].astype(str).str.casefold()
+                        == network.casefold()
+                    ]
+
                 series = chunk[col_name].dropna()
 
-                for local_i, s in series.items():
-                    s = str(s).strip()
+                for local_i, s in enumerate(series.astype(str).str.strip()):
                     if not s:
                         continue
 
-                    global_row = row_offset + int(local_i)
+                    global_row = row_offset + local_i
                     prefixed = f"{global_row} {s}"
 
                     if is_multiparagraph(s):
-                        prefixed_fixed = prefixed.replace("\n", " ").replace("\r", " ")
                         multiline_bucket.append(prefixed)
-                        yield prefixed_fixed
-                        continue
-
-                    yield prefixed
-                    count += 1
+                        yield prefixed.replace("\n", " ").replace("\r", " ")
+                    else:
+                        yield prefixed
+                        count += 1
 
                     if limit > 0 and count >= limit:
                         return
 
                 row_offset += len(chunk)
 
-            if count == 0:
-                return
         except Exception:
             return
 
@@ -167,138 +211,110 @@ def load_csv_sentences(
     return g_live
 
 
-def to_csv(output_file: str, sentences: pd.DataFrame) -> None:
+def _safe_suffix(val: Optional[str]) -> str:
+    import re
+
+    if not val or val == "none":
+        return "all"
+
+    val = val.strip().casefold().replace(" ", "_")
+    val = re.sub(r"[^a-z0-9_\-]", "", val)
+    return val or "all"
+
+
+def save(
+    output_dir: Path,
+    df: pd.DataFrame,
+    network_filter: Optional[str] = None,
+) -> Path:
+    base = Path(config.SECOND_OUTPUT_PATH)
+    suffix = _safe_suffix(network_filter)
+
+    output_filename = f"{base.stem}_{suffix}{base.suffix}"
+    output_path = output_dir / output_filename
+
+    df.to_csv(
+        output_path,
+        index=config.SECOND_OUTPUT_INDEX,
+        encoding=config.SECOND_OUTPUT_ENCODING,
+        sep=config.SECOND_OUTPUT_SEPARATOR,
+    )
+
+    print(f"Saved to: {output_path}")
+    return output_path
+
+
+def get_sentences(
+    csv_path: str,
+    network_filter: Optional[str] = None,
+) -> Iterable[str]:
     try:
-        sentences.to_csv(output_file, index=False, encoding="utf-8", sep=",")
-        print(f"Sentences saved to {output_file}")
-    except Exception as e:
-        print(f"Error saving sentences to CSV: {e}")
-
-
-def get_preset(debug_mode: int) -> InputPreset:
-    preset = INPUT_PRESETS.get(debug_mode)
-    if preset is None:
-        raise ValueError(f"Invalid DEBUG_MODE: {debug_mode}")
-    return preset
-
-
-def prompt_csv_inputs(preset: InputPreset) -> tuple[str, str, int]:
-    # Skip asking if preset is 0
-    if preset.preset_value == 0:
-        print(f"Filename: {preset.file_default} \nColumn to check: {preset.col_default} \nMax number of lines (0 = all): {preset.limit_default}")
-        return preset.file_default, preset.col_default, preset.limit_default
-    file_name = safe_input(
-        str,
-        f"Enter CSV file name (default: {preset.file_default}): ",
-        default=preset.file_default,
-    )
-    col_name = safe_input(
-        str,
-        f"Enter column name (default: {preset.col_default}): ",
-        default=preset.col_default,
-    )
-    limit = safe_input(
-        int,
-        f"Enter max number of sentences to load (0 = all, default: {preset.limit_default}): ",
-        default=preset.limit_default,
-    )
-    return file_name, col_name, limit
-
-
-def prompt_manual_sentences() -> list[str]:
-    raw = safe_input(
-        str,
-        "No comments found. Enter sentences separated by ';': ",
-        default="Hello World!;Subject is BAD BAD BAD!!;Subject is not too bad.;Subject is the best thing ever!",
-    )
-    return [s for s in raw.split(";") if s.strip()]
-
-
-def get_sentences(preset: InputPreset) -> Union[Iterable[str], list[str]]:
-    try:
-        file_name, col_name, limit = prompt_csv_inputs(preset)
-        sentences = load_csv_sentences(file_name, col_name, limit=limit)
-        if sentences is None:
-            return prompt_manual_sentences()
-        return sentences
+        sentences = load_csv_sentences(
+            file_name=csv_path,
+            col_name=col_name,
+            limit=limit,
+            network_filter=network_filter,
+            network_col="Network",
+        )
+        return sentences if sentences is not None else iter(())
     except Exception as e:
         print(f"Error loading CSV sentences: {e}")
-        return prompt_manual_sentences()
-
-
-def compute_average_compound(sentences: Iterable[str]) -> tuple[float, int]:
-    sid = SentimentIntensityAnalyzer()
-    total = 0.0
-    count = 0
-    for s in sentences:
-        total += sid.polarity_scores(s)["compound"]
-        count += 1
-    avg = total / count if count > 0 else 0.0
-    return avg, count
-
-
-def average_line_text(avg: float, count: int) -> str:
-    return f"Average compound sentiment over {count} sentences: {avg}"
+        return iter(())
 
 
 def run_pipeline(
     viewer: SentimentViewer,
-    sentences: Union[Iterable[str], list[str]],
-    *,
-    average_only: bool,
+    sentences: Iterable[str],
+    sid: SentimentIntensityAnalyzer,
 ) -> None:
-    sentences = list(sentences)
-    if average_only:
-        avg, count = compute_average_compound(sentences)
-        viewer.add_line(average_line_text(avg, count), score=avg)
-        print(average_line_text(avg, count))
-        viewer.run()
-        return
-
-    sid = SentimentIntensityAnalyzer()
     total = 0.0
     count = 0
+    excluded_zero = 0
+
     for s in sentences:
-        ss = sid.polarity_scores(s)
-        total += ss["compound"]
+        score = sid.polarity_scores(s)["compound"]
+
+        viewer.add_line(s, score=score)
+
+        if score == 0.0:
+            excluded_zero += 1
+            continue
+
+        total += score
         count += 1
-        viewer.add_line(s)
 
     avg = total / count if count > 0 else 0.0
-    alt = average_line_text(avg, count)
-    viewer.add_line(alt, score=avg)
-    print(alt)
 
-    viewer.analyzed_sentences.append(alt)
-    v_sentences = viewer.analyzed_sentences
+    summary = (
+        f"Average compound sentiment over {count} sentences: {avg} "
+        f"(excluded {excluded_zero} for score 0.0)"
+    )
 
-    df = pd.DataFrame(v_sentences, columns=["Text"])
-    to_csv("sentiment_output.csv", df)
+    viewer.add_line(summary, score=avg, colour_override="#45a9cd")
+    print(summary)
+
+
+    avg_100 = compound_to_100(avg)
+    summary_100 = f"Sentiment score (0–100): {avg_100:.2f}"
+
+    viewer.add_line(summary_100, score=avg, colour_override="#45a9cd")
+    print(summary_100)
 
     viewer.run()
-    
 
 
-def main(debug_mode: int = 0) -> None:
-    preset = get_preset(debug_mode)
+def main(csv_path: str, network_filter: Optional[str] = None) -> None:
+    if network_filter == "none":
+        network_filter = None
 
-    sentences = get_sentences(preset)
+    sid = build_analyzer()
+    sentences = get_sentences(csv_path, network_filter=network_filter)
 
-    to_console = safe_input(
-        bool, "Output to console? Y/n (default: False): ", default=False
+    viewer = SentimentViewer(sid=sid, title="Comment Sentiment Log")
+    run_pipeline(viewer, sentences, sid)
+
+    analyzed_df = pd.DataFrame(
+        viewer.analyzed_sentences,
+        columns=["Analyzed Sentence"],
     )
-    average_only = safe_input(
-        bool, "Compute average only? Y/n (default: False): ", default=False
-    )
-    viewer = SentimentViewer(title="Comment Sentiment Log", console_output=to_console)
-
-    try:
-        run_pipeline(viewer, sentences, average_only=average_only)
-    except Exception as e:
-        print(f"Error processing sentences: {e}")
-
-
-if __name__ == "__main__":
-    DEBUG_MODE = 0
-    main(DEBUG_MODE)
-
+    save(Path(csv_path).parent, analyzed_df, network_filter)
